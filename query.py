@@ -1,20 +1,31 @@
 """
 Ask questions against the ingested HR policy documents.
 
+Generation runs via OpenRouter (hosted). Requires an OPENROUTER_API_KEY
+environment variable — get a free key at https://openrouter.ai/keys.
+
 Usage:
   python query.py                          # interactive CLI, uses "section" chunking
   python query.py --collection hr_policy_subsection
+  python query.py --model meta-llama/llama-3.1-8b-instruct:free
 """
 import argparse
-import json
-import chromadb
+import os
 import requests
 from sentence_transformers import SentenceTransformer
+from vectorstore import get_store
 
-DB_DIR = "chroma_db"
 EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
-OLLAMA_MODEL = "llama3.2:3b"
-OLLAMA_URL = "http://localhost:11434/api/generate"
+OPENROUTER_MODEL = "google/gemma-4-26b-a4b-it:free"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Below this best-match similarity, retrieval almost certainly didn't find a real answer.
+# Calibrated empirically on this corpus (10-question sample, corrected cosine similarity
+# after fixing the Chroma L2-vs-cosine bug — see FINDINGS.md): correct top-hits clustered
+# 0.78-0.90, genuinely unanswerable questions clustered 0.55-0.65. 0.70 sits in that gap.
+# Small sample — re-tune with more questions via eval.py if this misfires on your corpus.
+CONFIDENCE_THRESHOLD = 0.70
+NO_MATCH_ANSWER = "I don't know based on the provided documents. (no confident match found in retrieval)"
 
 # BGE models expect this instruction prefix on the query side for retrieval.
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
@@ -50,13 +61,9 @@ context provided below. Follow these rules strictly:
 """
 
 
-def retrieve(collection, model, question, top_k=4):
-    query_vec = model.encode([QUERY_PREFIX + question], normalize_embeddings=True).tolist()
-    results = collection.query(query_embeddings=query_vec, n_results=top_k)
-    hits = []
-    for doc, meta, dist in zip(results["documents"][0], results["metadatas"][0], results["distances"][0]):
-        hits.append({"text": doc, "source": meta["source"], "heading": meta["heading"], "distance": dist})
-    return hits
+def retrieve(store, collection_name, model, question, top_k=4):
+    query_vec = model.encode([QUERY_PREFIX + question], normalize_embeddings=True).tolist()[0]
+    return store.query(collection_name, query_vec, top_k)
 
 
 def build_prompt(question, hits):
@@ -74,24 +81,44 @@ Question: {question}
 Answer:"""
 
 
-def call_ollama(prompt):
+def call_openrouter(prompt):
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY environment variable is not set. "
+            "Get a free key at https://openrouter.ai/keys, then set it, e.g.:\n"
+            "  cmd:        set OPENROUTER_API_KEY=sk-or-...\n"
+            "  PowerShell: $env:OPENROUTER_API_KEY = 'sk-or-...'"
+        )
     resp = requests.post(
-        OLLAMA_URL,
-        json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "options": {"temperature": 0.1}},
+        OPENROUTER_URL,
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": OPENROUTER_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+        },
         timeout=120,
     )
     resp.raise_for_status()
-    return resp.json()["response"].strip()
+    return resp.json()["choices"][0]["message"]["content"].strip()
 
 
-def ask(collection, model, question, top_k=4, verbose=True):
-    hits = retrieve(collection, model, question, top_k=top_k)
-    prompt = build_prompt(question, hits)
-    answer = call_ollama(prompt)
+def ask(store, collection_name, model, question, top_k=4, verbose=True, confidence_threshold=CONFIDENCE_THRESHOLD):
+    hits = retrieve(store, collection_name, model, question, top_k=top_k)
     if verbose:
         print("\nRetrieved chunks:")
         for h in hits:
-            print(f"  - [{h['source']} / {h['heading']}] (distance={h['distance']:.4f})")
+            print(f"  - [{h['source']} / {h['heading']}] (similarity={h['similarity']:.4f})")
+
+    best_similarity = max((h["similarity"] for h in hits), default=0.0)
+    if best_similarity < confidence_threshold:
+        if verbose:
+            print(f"  Best similarity {best_similarity:.4f} < threshold {confidence_threshold} — skipping LLM call.")
+        return NO_MATCH_ANSWER, hits
+
+    prompt = build_prompt(question, hits)
+    answer = call_openrouter(prompt)
     return answer, hits
 
 
@@ -99,15 +126,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--collection", default="hr_policy_section")
     parser.add_argument("--top_k", type=int, default=4)
-    parser.add_argument("--model", default=OLLAMA_MODEL)
+    parser.add_argument("--model", default=OPENROUTER_MODEL)
+    parser.add_argument("--threshold", type=float, default=CONFIDENCE_THRESHOLD, help="similarity below this skips the LLM call and refuses immediately; use 0 to disable")
     args = parser.parse_args()
-    OLLAMA_MODEL = args.model
+    OPENROUTER_MODEL = args.model
 
-    client = chromadb.PersistentClient(path=DB_DIR)
-    collection = client.get_collection(args.collection)
+    store = get_store()
     model = SentenceTransformer(EMBED_MODEL_NAME)
 
-    print(f"Using collection '{args.collection}' ({collection.count()} chunks). Model: {OLLAMA_MODEL}")
+    print(f"Using collection '{args.collection}' ({store.count(args.collection)} chunks). Model: {OPENROUTER_MODEL}. Confidence threshold: {args.threshold}")
     print("Type a question, or 'exit' to quit.\n")
 
     while True:
@@ -116,5 +143,5 @@ if __name__ == "__main__":
             break
         if not question:
             continue
-        answer, hits = ask(collection, model, question, top_k=args.top_k)
+        answer, hits = ask(store, args.collection, model, question, top_k=args.top_k, confidence_threshold=args.threshold)
         print(f"\nA> {answer}\n")

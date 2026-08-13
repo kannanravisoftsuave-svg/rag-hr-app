@@ -1,19 +1,20 @@
 """
-Ingest HR policy documents into two Chroma collections using two different
+Ingest HR policy documents into two collections using two different
 chunking granularities, so we can compare retrieval quality between them:
 
   - "subsection": one chunk per ### heading (small, precise)
   - "section":    one chunk per ## heading, merging all its ### children (larger, more context)
 
+Stores into Qdrant (local/embedded — no server needed).
+
 Usage: python ingest.py
 """
 import re
 import glob
-import chromadb
 from sentence_transformers import SentenceTransformer
+from vectorstore import get_store
 
 DATA_DIR = "data"
-DB_DIR = "chroma_db"
 EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 SECTION_RE = re.compile(r"^##\s+(.*)$", re.MULTILINE)
@@ -53,13 +54,7 @@ def chunk_section(text, source):
     return chunks
 
 
-def build_collection(client, name, chunk_fn):
-    try:
-        client.delete_collection(name)
-    except Exception:
-        pass
-    collection = client.create_collection(name)
-
+def build_collection(store, name, chunk_fn):
     print(f"\n=== Building collection '{name}' ===")
     model = get_model()
     all_chunks = []
@@ -77,10 +72,9 @@ def build_collection(client, name, chunk_fn):
 
     texts = [c["text"] for c in all_chunks]
     embeddings = model.encode(texts, normalize_embeddings=True).tolist()
-    ids = [f"{name}-{i}" for i in range(len(all_chunks))]
     metadatas = [{"source": c["source"], "heading": c["heading"]} for c in all_chunks]
 
-    collection.add(ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas)
+    store.build_collection(name, texts, embeddings, metadatas)
     print(f"  Total chunks stored: {len(all_chunks)}")
     sizes = [len(t) for t in texts]
     print(f"  Chunk size (chars): min={min(sizes)} max={max(sizes)} avg={sum(sizes)//len(sizes)}")
@@ -98,7 +92,7 @@ def get_model():
 
 
 if __name__ == "__main__":
-    client = chromadb.PersistentClient(path=DB_DIR)
-    build_collection(client, "hr_policy_subsection", chunk_subsection)
-    build_collection(client, "hr_policy_section", chunk_section)
+    store = get_store()
+    build_collection(store, "hr_policy_subsection", chunk_subsection)
+    build_collection(store, "hr_policy_section", chunk_section)
     print("\nIngestion complete.")

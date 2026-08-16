@@ -32,13 +32,28 @@ class QdrantStore:
         result = self.client.query_points(collection_name=name, query=query_embedding, limit=top_k)
         hits = []
         for point in result.points:
-            payload = point.payload
-            # Qdrant reports cosine similarity directly (higher = more similar).
-            hits.append({"text": payload["text"], "source": payload["source"], "heading": payload["heading"], "similarity": point.score})
+            # Include point id so HybridRetriever can match dense hits to BM25 rankings.
+            hits.append({**point.payload, "similarity": point.score, "id": point.id})
         return hits
 
     def count(self, name):
         return self.client.count(collection_name=name).count
+
+    def get_all(self, name):
+        """Fetch every point from a collection for BM25 index building. Returns list sorted by id."""
+        all_records = []
+        offset = None
+        while True:
+            records, next_offset = self.client.scroll(
+                collection_name=name, limit=256, offset=offset,
+                with_payload=True, with_vectors=False,
+            )
+            all_records.extend(records)
+            if next_offset is None:
+                break
+            offset = next_offset
+        all_records.sort(key=lambda p: p.id)
+        return [{**p.payload, "id": p.id} for p in all_records]
 
 
 def get_store(url=QDRANT_URL):

@@ -1,0 +1,5 @@
+sentence-transformers==5.7.0
+qdrant-client==1.19.0
+requests==2.34.2
+pypdf==6.15.0
+rank_bm25==0.2.2

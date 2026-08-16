@@ -1,0 +1,35 @@
+Run these in order in PowerShell:
+
+**Step 1 — Start Qdrant**
+```bash
+docker run -d --name qdrant-hr -p 6333:6333 -v D:/AI/rag-hr-app/qdrant_db:/qdrant/storage qdrant/qdrant
+```
+
+**Step 2 — Set API key**
+```bash
+$env:OPENROUTER_API_KEY = "your-key-here"
+```
+
+**Step 3 — Navigate to project**
+```bash
+cd D:\AI\rag-hr-app
+```
+
+**Step 4 — Ingest documents**
+```bash
+.\venv\Scripts\python.exe ingest.py
+```
+
+**Step 5 — Ask questions (with parent-child collection + re-ranking)**
+```bash
+.\venv\Scripts\python.exe query.py --collection hr_policy_parent_child
+```
+
+**Step 6 — Run evaluation (optional)**
+```bash
+.\venv\Scripts\python.exe eval.py
+```
+
+---
+
+Replace `your-key-here` in Step 2 with your actual key from [openrouter.ai/keys](https://openrouter.ai/keys). The key only lasts for the PowerShell session — set it again if you open a new window.

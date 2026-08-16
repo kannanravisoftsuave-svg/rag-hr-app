@@ -54,6 +54,34 @@ def chunk_section(text, source):
     return chunks
 
 
+def chunk_parent_child(text, source):
+    """Embed child (###) chunks for precise retrieval; store parent (##) text for generation.
+    Resolves the dilution-vs-context tradeoff: retrieval uses focused child embeddings,
+    the LLM receives the full section for better reasoning. Falls back to treating each
+    ## section as its own child when a document has no ### subsections (e.g. addendum)."""
+    chunks = []
+    for parent_heading, parent_body in split_by_heading(text, SECTION_RE):
+        subsections = split_by_heading(parent_body, SUBSECTION_RE)
+        if subsections:
+            for child_heading, child_body in subsections:
+                chunks.append({
+                    "text": child_body,
+                    "parent_text": parent_body,
+                    "heading": child_heading,
+                    "parent_heading": parent_heading,
+                    "source": source,
+                })
+        else:
+            chunks.append({
+                "text": parent_body,
+                "parent_text": parent_body,
+                "heading": parent_heading,
+                "parent_heading": parent_heading,
+                "source": source,
+            })
+    return chunks
+
+
 def build_collection(store, name, chunk_fn):
     print(f"\n=== Building collection '{name}' ===")
     model = get_model()
@@ -72,7 +100,9 @@ def build_collection(store, name, chunk_fn):
 
     texts = [c["text"] for c in all_chunks]
     embeddings = model.encode(texts, normalize_embeddings=True).tolist()
-    metadatas = [{"source": c["source"], "heading": c["heading"]} for c in all_chunks]
+    # Exclude "text" (stored separately) but keep all other fields (source, heading,
+    # and parent_text/parent_heading for parent-child collections).
+    metadatas = [{k: v for k, v in c.items() if k != "text"} for c in all_chunks]
 
     store.build_collection(name, texts, embeddings, metadatas)
     print(f"  Total chunks stored: {len(all_chunks)}")
@@ -95,4 +125,5 @@ if __name__ == "__main__":
     store = get_store()
     build_collection(store, "hr_policy_subsection", chunk_subsection)
     build_collection(store, "hr_policy_section", chunk_section)
+    build_collection(store, "hr_policy_parent_child", chunk_parent_child)
     print("\nIngestion complete.")

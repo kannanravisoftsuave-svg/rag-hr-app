@@ -11,12 +11,24 @@ Usage:
 """
 import argparse
 import os
+import time
 import requests
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 from vectorstore import get_store
 
+CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+_cross_encoder = None
+
+
+def get_cross_encoder():
+    global _cross_encoder
+    if _cross_encoder is None:
+        print(f"Loading cross-encoder '{CROSS_ENCODER_MODEL}'...")
+        _cross_encoder = CrossEncoder(CROSS_ENCODER_MODEL)
+    return _cross_encoder
+
 EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
-OPENROUTER_MODEL = "google/gemma-4-26b-a4b-it:free"
+OPENROUTER_MODEL = "nvidia/nemotron-3.5-lightning:free"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Below this best-match similarity, retrieval almost certainly didn't find a real answer.
@@ -61,15 +73,34 @@ context provided below. Follow these rules strictly:
 """
 
 
-def retrieve(store, collection_name, model, question, top_k=4):
-    query_vec = model.encode([QUERY_PREFIX + question], normalize_embeddings=True).tolist()[0]
-    return store.query(collection_name, query_vec, top_k)
+def retrieve(store, collection_name, model, question, top_k=8, rerank=True, hybrid_retriever=None):
+    candidate_k = top_k * 3 if rerank else top_k
+    if hybrid_retriever is not None:
+        hits = hybrid_retriever.retrieve(question, top_k=candidate_k)
+    else:
+        query_vec = model.encode([QUERY_PREFIX + question], normalize_embeddings=True).tolist()[0]
+        hits = store.query(collection_name, query_vec, candidate_k)
+    if rerank and len(hits) > top_k:
+        ce = get_cross_encoder()
+        scores = ce.predict([(question, h["text"]) for h in hits])
+        hits = [h for _, h in sorted(zip(scores, hits), key=lambda x: x[0], reverse=True)][:top_k]
+    return hits
 
 
 def build_prompt(question, hits):
     context_blocks = []
+    seen = set()
     for h in hits:
-        context_blocks.append(f"[Source: {h['source']} | Section: {h['heading']}]\n{h['text']}")
+        # For parent-child collections, send the full parent section to the LLM; fall back to
+        # the child text for collections that don't carry parent_text. Deduplicate by content
+        # so multiple children of the same parent don't bloat the context with repeated text.
+        context_text = h.get("parent_text", h["text"])
+        heading = h.get("parent_heading", h["heading"])
+        key = (h["source"], heading)
+        if key in seen:
+            continue
+        seen.add(key)
+        context_blocks.append(f"[Source: {h['source']} | Section: {heading}]\n{context_text}")
     context = "\n\n---\n\n".join(context_blocks)
     return f"""{SYSTEM_PROMPT}
 
@@ -81,7 +112,7 @@ Question: {question}
 Answer:"""
 
 
-def call_openrouter(prompt):
+def call_openrouter(prompt, max_retries=4):
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -90,22 +121,29 @@ def call_openrouter(prompt):
             "  cmd:        set OPENROUTER_API_KEY=sk-or-...\n"
             "  PowerShell: $env:OPENROUTER_API_KEY = 'sk-or-...'"
         )
-    resp = requests.post(
-        OPENROUTER_URL,
-        headers={"Authorization": f"Bearer {api_key}"},
-        json={
-            "model": OPENROUTER_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1,
-        },
-        timeout=120,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    for attempt in range(max_retries):
+        resp = requests.post(
+            OPENROUTER_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": OPENROUTER_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+            },
+            timeout=120,
+        )
+        if resp.status_code == 429:
+            wait = 5 * (2 ** attempt)  # 5s, 10s, 20s, 40s
+            print(f"  [rate limited — waiting {wait}s before retry {attempt + 1}/{max_retries}]")
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    resp.raise_for_status()  # raise after exhausting retries
 
 
-def ask(store, collection_name, model, question, top_k=4, verbose=True, confidence_threshold=CONFIDENCE_THRESHOLD):
-    hits = retrieve(store, collection_name, model, question, top_k=top_k)
+def ask(store, collection_name, model, question, top_k=8, verbose=True, confidence_threshold=CONFIDENCE_THRESHOLD, rerank=True, hybrid_retriever=None):
+    hits = retrieve(store, collection_name, model, question, top_k=top_k, rerank=rerank, hybrid_retriever=hybrid_retriever)
     if verbose:
         print("\nRetrieved chunks:")
         for h in hits:
@@ -125,16 +163,24 @@ def ask(store, collection_name, model, question, top_k=4, verbose=True, confiden
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--collection", default="hr_policy_section")
-    parser.add_argument("--top_k", type=int, default=4)
+    parser.add_argument("--top_k", type=int, default=8)
     parser.add_argument("--model", default=OPENROUTER_MODEL)
     parser.add_argument("--threshold", type=float, default=CONFIDENCE_THRESHOLD, help="similarity below this skips the LLM call and refuses immediately; use 0 to disable")
+    parser.add_argument("--no-rerank", dest="rerank", action="store_false", help="disable cross-encoder re-ranking (faster but lower precision)")
+    parser.add_argument("--hybrid", action="store_true", default=True, help="use BM25+dense hybrid search (default on)")
+    parser.add_argument("--no-hybrid", dest="hybrid", action="store_false", help="disable hybrid search, use dense only")
     args = parser.parse_args()
     OPENROUTER_MODEL = args.model
 
     store = get_store()
     model = SentenceTransformer(EMBED_MODEL_NAME)
 
-    print(f"Using collection '{args.collection}' ({store.count(args.collection)} chunks). Model: {OPENROUTER_MODEL}. Confidence threshold: {args.threshold}")
+    hybrid_retriever = None
+    if args.hybrid:
+        from hybrid import HybridRetriever
+        hybrid_retriever = HybridRetriever(store, args.collection, model, QUERY_PREFIX)
+
+    print(f"Using collection '{args.collection}' ({store.count(args.collection)} chunks). Model: {OPENROUTER_MODEL}. Threshold: {args.threshold}. Re-rank: {args.rerank}. Hybrid: {args.hybrid}")
     print("Type a question, or 'exit' to quit.\n")
 
     while True:
@@ -143,5 +189,5 @@ if __name__ == "__main__":
             break
         if not question:
             continue
-        answer, hits = ask(store, args.collection, model, question, top_k=args.top_k, confidence_threshold=args.threshold)
+        answer, hits = ask(store, args.collection, model, question, top_k=args.top_k, confidence_threshold=args.threshold, rerank=args.rerank, hybrid_retriever=hybrid_retriever)
         print(f"\nA> {answer}\n")

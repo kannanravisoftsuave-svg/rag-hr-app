@@ -112,34 +112,53 @@ Question: {question}
 Answer:"""
 
 
-def call_openrouter(prompt, max_retries=4):
+FALLBACK_MODELS = [
+    OPENROUTER_MODEL,
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "google/gemma-4-31b-it:free",
+    "minimax/minimax-m3:free",
+]
+
+
+def call_openrouter(prompt, max_retries=3):
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError(
             "OPENROUTER_API_KEY environment variable is not set. "
-            "Get a free key at https://openrouter.ai/keys, then set it, e.g.:\n"
-            "  cmd:        set OPENROUTER_API_KEY=sk-or-...\n"
-            "  PowerShell: $env:OPENROUTER_API_KEY = 'sk-or-...'"
+            "Get a free key at https://openrouter.ai/keys"
         )
-    for attempt in range(max_retries):
-        resp = requests.post(
-            OPENROUTER_URL,
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": OPENROUTER_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.1,
-            },
-            timeout=120,
-        )
-        if resp.status_code == 429:
-            wait = 5 * (2 ** attempt)  # 5s, 10s, 20s, 40s
-            print(f"  [rate limited — waiting {wait}s before retry {attempt + 1}/{max_retries}]")
-            time.sleep(wait)
-            continue
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
-    resp.raise_for_status()  # raise after exhausting retries
+    models_to_try = list(dict.fromkeys(FALLBACK_MODELS))
+    last_error = None
+
+    for model_id in models_to_try:
+        for attempt in range(max_retries):
+            resp = requests.post(
+                OPENROUTER_URL,
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                },
+                timeout=120,
+            )
+            if resp.status_code == 429:
+                wait = 5 * (2 ** attempt)
+                print(f"  [rate limited on {model_id} — waiting {wait}s]")
+                time.sleep(wait)
+                continue
+            if resp.status_code in (502, 503, 500):
+                print(f"  [model {model_id} returned {resp.status_code} — trying next]")
+                last_error = f"{model_id} HTTP {resp.status_code}"
+                break
+            resp.raise_for_status()
+            answer = resp.json()["choices"][0]["message"]["content"].strip()
+            if model_id != OPENROUTER_MODEL:
+                print(f"  [used fallback model: {model_id}]")
+            return answer
+
+    raise RuntimeError(f"All models failed. Last error: {last_error}")
 
 
 def ask(store, collection_name, model, question, top_k=8, verbose=True, confidence_threshold=CONFIDENCE_THRESHOLD, rerank=True, hybrid_retriever=None):

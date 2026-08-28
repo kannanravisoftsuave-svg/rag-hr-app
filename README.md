@@ -1,154 +1,124 @@
-# Ask My HR Documents — Mini RAG App
+# RAG HR App — Week 5: Dynamic RAG with Observability
 
-An "ask my documents" app for HR policy: ingests a base employee handbook
-plus a policy addendum, answers questions using only those documents with
-a citation, and says "I don't know" if the answer isn't in the documents.
+An end-to-end Retrieval-Augmented Generation (RAG) app for HR policy documents. Upload PDFs, DOCX, Markdown, or plain-text files, ask natural-language questions, and get cited answers — with full LLM observability via Langfuse.
 
-**Stack:** Python + `sentence-transformers` (BGE-small embeddings, local,
-free) + **Qdrant running in Docker** (vector store, server mode) +
-**OpenRouter** (hosted LLM, `google/gemma-4-26b-a4b-it:free` by default —
-free tier, needs an API key).
+**Stack:** FastAPI · Qdrant · BGE-small embeddings · Cross-encoder reranking · OpenRouter LLM · Langfuse tracing · React + Vite + Tailwind CSS
 
-See `VERSIONS.md` for how this evolved (v1: fully local/Ollama/Chroma →
-v2: OpenRouter + Qdrant added, bug fixes, auto-scoring → v3: Chroma
-removed, Qdrant moved into Docker).
+---
+
+## What was built
+
+### Week 1–3 (foundation)
+- Python CLI (`query.py`) with BGE-small-en-v1.5 embeddings stored in Qdrant
+- Sliding-window and heading-based chunking strategies
+- Cross-encoder reranking with `ms-marco-MiniLM-L-6-v2`
+- Confidence gate — blocks LLM call when best similarity is below threshold
+- Hybrid BM25 + dense vector retrieval
+- OpenRouter free LLM with fallback model chain
+
+### Week 4 (API + Tracing)
+- **FastAPI backend** (`api/`) replacing the CLI — endpoints for upload, query, documents, chunks, collections, health
+- **Langfuse v4 tracing** (`tracing.py`) — every query and upload creates a root span with nested child spans:
+  - Query: `retrieval` → `reranking` → `confidence_gate` → `llm_generation`
+  - Ingestion: `text_extraction` → `chunking` → `embedding` → `vector_store`
+- Pydantic v2 request/response models (`api/models.py`)
+- Streamlit UI (`ui/app.py`) with file upload, query, document browser
+
+### Week 5 (React UI + Pipeline hardening)
+- **React UI** (`ui-react/`) — replaced Streamlit with Vite + React + Tailwind CSS:
+  - **Upload page** — drag-and-drop, collection selector, chunking strategy, metrics, Langfuse link
+  - **Query page** — settings sidebar (collection, filter by doc, top-k, threshold, hybrid toggle), answer panel with confidence badge, expandable chunk list, trace link
+  - **Documents page** — collection picker, expandable document list with chunk explorer
+  - **Traces page** — span reference table, Langfuse dashboard link, last-query trace card
+- **Pipeline hardening:**
+  - UUID-based Qdrant point IDs (fixed integer ID collision bug when re-uploading files)
+  - Batch embedding (32 chunks at a time — prevents OOM on large documents)
+  - Sigmoid(CE score) as confidence signal — cross-encoder score is a better relevance indicator than raw dense similarity
+  - `_delete_by_source()` deduplication — clean re-upload without stale chunks
+  - `.txt` file support added
+- **Confidence threshold** lowered to `0.45` (re-calibrated for short/unpunctuated text like org charts)
+- **Chunker improvements** — hard-splits at 400 chars even without punctuation; splits on `\n` for org chart / table text
+
+---
 
 ## Project layout
 
 ```
-data/
-  employee_handbook.md     base HR policy (v3.0)
-  policy_addendum.md       new policy addendum being ingested
-vectorstore.py             wrapper over Qdrant (build/query/count collections)
-ingest.py                  builds two chunking-strategy collections
-query.py                   interactive CLI to ask questions
-eval.py                    runs a fixed question set against both collections, auto-scored
-inspect_db.py              peek at stored chunks/metadata/embeddings
-FINDINGS.md                write-up: chunk-size comparison + failure modes
-VERSIONS.md                version history: what changed and why, v1 -> v3
-questions.md               categorized sample questions to try
+api/
+  main.py          FastAPI app — all endpoints
+  models.py        Pydantic request/response models
+ingestion/
+  pipeline.py      File → Qdrant ingestion (extract → chunk → embed → store)
+  extractor.py     PDF / DOCX / MD / TXT text extraction
+  chunker.py       Sliding-window, heading, page chunking strategies
+ui-react/
+  src/
+    App.jsx        Sidebar nav + health badge
+    api.js         axios client (proxied to :8000)
+    pages/
+      Upload.jsx
+      Query.jsx
+      Documents.jsx
+      Traces.jsx
+ui/
+  app.py           Streamlit UI (legacy, still works)
+config.py          All settings (model names, threshold, collection names)
+tracing.py         Langfuse v4 span/generation helpers
+vectorstore.py     Qdrant wrapper (query, upsert, list, count)
+hybrid.py          BM25 + dense hybrid retrieval
+query.py           CLI entrypoint + build_prompt / SYSTEM_PROMPT
+.env.example       Template — copy to .env and fill in your keys
+SETUP.md           Full setup instructions
 ```
 
-## One-time setup
+---
 
-Already done in this environment:
-- Python 3.13 venv at `venv/`
-- Packages installed: `sentence-transformers`, `qdrant-client`, `pypdf`, `requests`
-- Docker Desktop running, Qdrant server container `qdrant-hr` created
+## Quick start
 
-To set up from scratch elsewhere (run in `cmd.exe`, from inside `rag-hr-app\`):
-```bat
-py -3.13 -m venv venv
-venv\Scripts\python.exe -m pip install sentence-transformers qdrant-client pypdf requests
-docker run -d --name qdrant-hr -p 6333:6333 -p 6334:6334 -v qdrant_storage:/qdrant/storage qdrant/qdrant
-```
+See **[SETUP.md](SETUP.md)** for the full setup guide.
 
-### Start Qdrant before every session (if not already running)
-```bat
+```bash
+# 1. Start Qdrant
 docker start qdrant-hr
-```
-Check it's up: open http://localhost:6333/dashboard in a browser, or:
-```bat
-curl http://localhost:6333
-```
-(Only use `docker run` the very first time — it creates the container.
-Every time after that, use `docker start qdrant-hr` to reuse the same
-container and keep its data.)
 
-### Get an OpenRouter API key (required for generation)
-1. Sign up free at https://openrouter.ai
-2. Go to https://openrouter.ai/keys and create a key
-3. Set it as an environment variable (don't hardcode it anywhere):
-```bat
-set OPENROUTER_API_KEY=sk-or-your-key-here
-```
-This only lasts for the current `cmd.exe` session. To persist it across
-sessions, use `setx OPENROUTER_API_KEY "sk-or-your-key-here"` and open a new
-terminal afterward.
+# 2. Start FastAPI backend
+uvicorn api.main:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 300
 
-## Running it
+# 3. Start React UI (separate terminal)
+cd ui-react && npm run dev
 
-All commands below assume you're in `cmd.exe` with the current directory set to
-`D:\AI\rag-hr-app`, e.g.:
-```bat
-cd D:\AI\rag-hr-app
+# 4. Open http://localhost:3000
 ```
 
-### 1. Ingest the documents
-Run this whenever files in `data\` change:
-```bat
-venv\Scripts\python.exe ingest.py
-```
-Builds two collections at different chunk granularities:
-- `hr_policy_subsection` — one chunk per `###` sub-heading (small, precise)
-- `hr_policy_section` — one chunk per `##` heading, merging its sub-headings (larger, more context)
+---
 
-Check the printed chunk counts per source file — a `0 chunks` line for any
-file means the chunker silently dropped that document (this happened once
-during development; see `FINDINGS.md` §5).
+## Configuration
 
-### 2. Ask questions interactively
-```bat
-venv\Scripts\python.exe query.py
-```
-Type a question at the `Q>` prompt, `exit` to quit.
+All tunable settings are in `config.py`. Key values:
 
-Useful flags:
-```bat
-REM use the larger-chunk collection instead of the default (hr_policy_section)
-venv\Scripts\python.exe query.py --collection hr_policy_subsection
+| Setting | Default | Description |
+|---|---|---|
+| `CONFIDENCE_THRESHOLD` | `0.45` | Dense similarity below this blocks the LLM call |
+| `DEFAULT_TOP_K` | `8` | Chunks retrieved per query |
+| `EMBED_MODEL_NAME` | `BAAI/bge-small-en-v1.5` | Local embedding model (384-dim) |
+| `CROSS_ENCODER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Reranking model |
+| `OPENROUTER_MODEL` | `nvidia/nemotron-3.5-lightning:free` | Primary LLM (5 fallbacks configured) |
 
-REM retrieve more candidate chunks before generation (default is 4)
-venv\Scripts\python.exe query.py --top_k 8
+---
 
-REM use a different OpenRouter model
-venv\Scripts\python.exe query.py --model meta-llama/llama-3.1-8b-instruct:free
+## Observability
 
-REM change or disable the confidence-threshold auto-refuse (default 0.70, see below)
-venv\Scripts\python.exe query.py --threshold 0.6
-venv\Scripts\python.exe query.py --threshold 0
-```
-Browse free/paid model names at https://openrouter.ai/models (filter by price).
+Every query and upload is traced in Langfuse. Each trace has:
 
-### 3. Run the chunk-size comparison (now auto-scored)
-```bat
-venv\Scripts\python.exe eval.py
-```
-Runs the fixed question set (in `eval.py`'s `QUESTIONS` list) against both
-collections, automatically scoring each answer PASS/FAIL against expected
-keywords, and prints a final score summary per collection — no manual
-reading required. Edit `QUESTIONS` to add your own test cases.
+| Span | Records |
+|---|---|
+| `retrieval` | Hit count, top similarity scores |
+| `reranking` | CE score, sigmoid confidence |
+| `confidence_gate` | Dense sim vs threshold, pass/fail |
+| `llm_generation` | Full prompt, model response |
+| `text_extraction` | Format, char count, table detection |
+| `chunking` | Strategy, chunk count, avg size |
+| `embedding` | Model, batch count |
+| `vector_store` | Points stored, old points deleted |
 
-### Peek at what's actually stored
-```bat
-venv\Scripts\python.exe inspect_db.py hr_policy_subsection 5
-```
-Shows raw chunk text, metadata, and a peek at the embedding vector for
-the first N chunks in a collection.
-
-## How retrieval confidence works
-
-`query.py` checks the best-match similarity score before calling the LLM
-at all. Below `CONFIDENCE_THRESHOLD` (0.70, set in `query.py`), it refuses
-immediately with no network call — deterministic, not dependent on the
-LLM's own judgment. This threshold was calibrated empirically: on a
-10-question sample, correct answers' top-hit similarity clustered
-0.78-0.90, genuinely unanswerable questions clustered 0.55-0.65. Re-tune
-via `--threshold` if it misfires on questions outside that sample.
-
-## Known limitations (see FINDINGS.md for full detail)
-
-- A small/weak generation model can misread or fail to extract a fact from
-  a large/dense chunk even when retrieval finds the right one — smaller
-  chunks reduce this.
-- Multi-hop questions requiring two facts from different sections can fail
-  at the reasoning/synthesis step, not just retrieval.
-- On questions the documents are genuinely silent about (not simply
-  "missing," but never addressing the specific scenario), a model can
-  manufacture a confident yes/no answer instead of saying so — a bias
-  toward giving *a* definitive answer over admitting silence.
-- Generation is hosted, so `query.py`/`eval.py` need network access and a
-  valid `OPENROUTER_API_KEY`; retrieval/embeddings remain fully local and
-  offline-capable.
-- The confidence threshold is calibrated on a small (10-question) sample —
-  treat it as a reasonable default, not a proven-optimal cutoff.
+View traces at https://cloud.langfuse.com after configuring `LANGFUSE_SECRET_KEY` and `LANGFUSE_PUBLIC_KEY` in `.env`.

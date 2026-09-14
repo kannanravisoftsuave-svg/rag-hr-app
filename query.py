@@ -121,7 +121,9 @@ FALLBACK_MODELS = [
 ]
 
 
-def call_openrouter(prompt, max_retries=3):
+def call_openrouter(prompt, max_retries=3, response_format=None):
+    """response_format: pass {"type": "json_object"} to ask the model for JSON-mode output
+    (used by structured_answer.py). None means the original free-text behavior, unchanged."""
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -133,14 +135,17 @@ def call_openrouter(prompt, max_retries=3):
 
     for model_id in models_to_try:
         for attempt in range(max_retries):
+            payload = {
+                "model": model_id,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+            }
+            if response_format is not None:
+                payload["response_format"] = response_format
             resp = requests.post(
                 OPENROUTER_URL,
                 headers={"Authorization": f"Bearer {api_key}"},
-                json={
-                    "model": model_id,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1,
-                },
+                json=payload,
                 timeout=120,
             )
             if resp.status_code == 429:
@@ -188,6 +193,9 @@ if __name__ == "__main__":
     parser.add_argument("--no-rerank", dest="rerank", action="store_false", help="disable cross-encoder re-ranking (faster but lower precision)")
     parser.add_argument("--hybrid", action="store_true", default=True, help="use BM25+dense hybrid search (default on)")
     parser.add_argument("--no-hybrid", dest="hybrid", action="store_false", help="disable hybrid search, use dense only")
+    parser.add_argument("--structured", action="store_true",
+                        help="use the Pydantic-validated JSON output path (structured_answer.py) "
+                             "instead of free-text parsing")
     args = parser.parse_args()
     OPENROUTER_MODEL = args.model
 
@@ -208,5 +216,16 @@ if __name__ == "__main__":
             break
         if not question:
             continue
-        answer, hits = ask(store, args.collection, model, question, top_k=args.top_k, confidence_threshold=args.threshold, rerank=args.rerank, hybrid_retriever=hybrid_retriever)
-        print(f"\nA> {answer}\n")
+        if args.structured:
+            from structured_answer import ask_structured
+            result = ask_structured(store, args.collection, model, question, top_k=args.top_k,
+                                     confidence_threshold=args.threshold, hybrid_retriever=hybrid_retriever,
+                                     rerank=args.rerank)
+            print(f"\nQuotes:    {result.quotes}")
+            print(f"Reasoning: {result.reasoning}")
+            print(f"Sources:   {result.sources}")
+            print(f"Refusal:   {result.is_refusal}")
+            print(f"\nA> {result.answer}\n")
+        else:
+            answer, hits = ask(store, args.collection, model, question, top_k=args.top_k, confidence_threshold=args.threshold, rerank=args.rerank, hybrid_retriever=hybrid_retriever)
+            print(f"\nA> {answer}\n")

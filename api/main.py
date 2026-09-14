@@ -224,16 +224,34 @@ def query(req: QueryRequest):
             gate_obs.update(output={"passed": True, "best_similarity": round(best_sim, 4), "ce_confidence": round(ce_confidence, 4)})
 
         # ── Generation ────────────────────────────────────────────────────────
-        from query import build_prompt
-        prompt = build_prompt(req.question, hits)
-
-        with lf_generation("llm_generation", model=OPENROUTER_MODEL, input=prompt) as gen_obs:
-            try:
-                answer = _call_llm(prompt)
-            except Exception as exc:
-                gen_obs.update(output={"error": str(exc)}, level="ERROR")
-                raise HTTPException(502, f"LLM call failed: {exc}")
-            gen_obs.update(output=answer)
+        structured = None
+        if req.use_structured_output:
+            from structured_answer import build_structured_prompt, parse_structured_answer
+            prompt = build_structured_prompt(req.question, hits)
+            with lf_generation("llm_generation", model=OPENROUTER_MODEL, input=prompt) as gen_obs:
+                try:
+                    raw = _call_llm(prompt, response_format={"type": "json_object"})
+                    structured = parse_structured_answer(raw)
+                except ValueError as exc:
+                    # one retry with the validation error fed back, same as structured_answer.ask_structured
+                    prompt += f"\n\nYour previous response was invalid: {exc}\nReturn ONLY the corrected JSON object."
+                    raw = _call_llm(prompt, response_format={"type": "json_object"})
+                    structured = parse_structured_answer(raw)  # let a second failure raise to the except below
+                except Exception as exc:
+                    gen_obs.update(output={"error": str(exc)}, level="ERROR")
+                    raise HTTPException(502, f"LLM call failed: {exc}")
+                gen_obs.update(output=structured.model_dump())
+            answer = structured.answer
+        else:
+            from query import build_prompt
+            prompt = build_prompt(req.question, hits)
+            with lf_generation("llm_generation", model=OPENROUTER_MODEL, input=prompt) as gen_obs:
+                try:
+                    answer = _call_llm(prompt)
+                except Exception as exc:
+                    gen_obs.update(output={"error": str(exc)}, level="ERROR")
+                    raise HTTPException(502, f"LLM call failed: {exc}")
+                gen_obs.update(output=answer)
 
         root_obs.update(output={"answer": answer, "confidence": confidence})
         lf_set_output({"answer": answer, "confidence": confidence})
@@ -245,6 +263,10 @@ def query(req: QueryRequest):
         confidence=confidence, chunks=_hits_to_chunks(hits),
         collection=req.collection, model=OPENROUTER_MODEL,
         trace_id=tid, trace_url=url,
+        quotes=structured.quotes if structured else None,
+        reasoning=structured.reasoning if structured else None,
+        sources=structured.sources if structured else None,
+        is_refusal=structured.is_refusal if structured else None,
     )
 
 
@@ -278,7 +300,7 @@ FALLBACK_MODELS = [
 ]
 
 
-def _call_llm(prompt: str, max_retries: int = 3) -> str:
+def _call_llm(prompt: str, max_retries: int = 3, response_format: dict | None = None) -> str:
     if not OPENROUTER_API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY is not set in .env")
 
@@ -288,14 +310,17 @@ def _call_llm(prompt: str, max_retries: int = 3) -> str:
     for model_id in models_to_try:
         for attempt in range(max_retries):
             try:
+                payload = {
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                }
+                if response_format is not None:
+                    payload["response_format"] = response_format
                 resp = http_lib.post(
                     OPENROUTER_URL,
                     headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-                    json={
-                        "model": model_id,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.1,
-                    },
+                    json=payload,
                     timeout=120,
                 )
                 if resp.status_code == 429:

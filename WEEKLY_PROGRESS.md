@@ -284,6 +284,102 @@ before/after number for any future change.
 
 ---
 
+## Week 7 — Agent Loops (and When Not to Use Them)
+
+**Format:** build week.
+
+### What We Learned
+- An **agent** is a loop: plan → act → observe → repeat, until it's done — with the AI deciding
+  the *next* step, not a human hardcoding it. Contrast with a **fixed workflow** (what every
+  earlier week built): a hardcoded sequence, always the same steps in the same order.
+- **When NOT to use an agent** is the real lesson: if you already know the exact steps needed, a
+  fixed sequence is faster, cheaper, and more reliable. Agents earn their keep only when the path
+  itself changes depending on the input.
+- Build the loop by hand, no framework (no LangChain/LangGraph) — so it's never a black box.
+- **ReAct** (Thought → Action → Observation) — the specific loop pattern used, chosen because it
+  makes every step visible by construction.
+- **Tool design** — give the agent a small number of clearly-described functions; write tool
+  descriptions carefully so it picks the right one.
+- **Stop conditions & budgets** — limits on steps, cost, and time so a confused model can't loop
+  forever and burn the API budget; also worth catching a model stuck repeating the exact same
+  action, not just counting steps.
+- **Memory** — not every agent needs persistent/vector memory (`mem0`, etc.). A single
+  self-contained multi-step task only needs an in-loop scratchpad — the running
+  Thought/Action/Observation transcript already **is** that memory. Reaching for `mem0` here
+  would be solving a problem the task doesn't have.
+
+### What We Did
+
+#### 1. `agent.py` — a hand-built ReAct loop (~90 lines)
+- Each step asks the model for a JSON object (`{"thought", "action", "action_input"}`, validated
+  with a Pydantic `AgentStep` model — same validation/retry pattern as `structured_answer.py`
+  from the Week 2 retrofit) instead of parsing free-text ReAct format, since it's more reliable
+  with free-tier OpenRouter models and keeps the codebase's structured-output approach consistent.
+- **Three tools:**
+  - `search_policy_docs(query)` — wraps the *existing* `retrieve()` from `query.py`. Not new
+    retrieval code, just exposed as something the agent can choose to call, and choose how many
+    times.
+  - `calculate_tenure(start_date, as_of_date)` — new, pure Python, exact date-day-count math.
+    **This directly targets the residual bug in `FINDINGS.md` #4** (still `known_issue=True` in
+    `eval.py`): the model conflating two different dates when doing tenure math in its head. The
+    system prompt explicitly tells the model to use this tool instead of computing dates itself.
+  - `finish(answer)` — the standard ReAct "I'm done" signal that ends the loop.
+- **Safety limits:** `max_steps` (default 6), `max_seconds` wall-clock timeout (default 90s), and
+  repeated-identical-action detection (same tool + same input called twice in a row → stop, don't
+  wait for the step cap to eventually catch it).
+- Every step is printed as it happens (`Thought:` / `Action:` / `Observation:`) — the "visible
+  steps" requirement from the brief.
+
+#### 2. `agent_vs_workflow.py` — the race
+- **No second fixed workflow was built.** `structured_answer.ask_structured()` (from the Week 2
+  retrofit) already *is* the fixed sequence — retrieve once, generate once. Building a duplicate
+  would have been redundant work; the senior move was reusing what already existed as the baseline.
+- **Race track:** reuses the two hardest questions already in `eval.py`'s `QUESTIONS` —
+  `"regression: multi-hop reasoning (Week 5 fix)"` and
+  `"regression: known gap - date disambiguation (documented, unresolved)"` — instead of inventing
+  a new test set. These are exactly the "path changes depending on the input" cases the brief says
+  agents are *for*; racing on a single-fact lookup question would be an uninteresting, unfair race
+  the fixed workflow should win trivially.
+- **Measures:** wall-clock time, LLM call count (the cost proxy — see the script's docstring for
+  why call count instead of token count), and correctness (keyword match, via `eval.py`'s
+  existing `score()`), for both approaches, printed as a side-by-side summary table.
+- **Deliberately does not auto-declare a winner** — the brief wants a human conclusion ("which one
+  would you actually ship, and why"), not a script's opinion.
+
+#### 3. Code review pass — one real bug found and fixed
+Before running anything for real, `agent.py` was re-read carefully end to end (since this
+machine couldn't run it — see Status below). Found and fixed:
+- **The "stuck" detector was comparing against the entire run history, not just the previous
+  step.** Original code: `recent_actions.count(action_signature) >= 2` — this counts how many
+  times that exact action+input appears across the *whole* transcript. So if the agent
+  legitimately called `search_policy_docs("remote work policy")` at step 1, did something else,
+  then had a good reason to re-check the same query at step 4, it would get wrongly killed as
+  "stuck" even though it never actually looped — unfairly penalizing the agent in the race.
+  **Fix:** replaced with a `repeat_streak` counter that only increments when the current action
+  matches the *immediately preceding* one, resetting to 1 otherwise — so only genuine
+  back-to-back repeats trip the safety stop.
+- Also wrapped `agent_vs_workflow.py`'s call-counting monkeypatch (`structured_answer.call_openrouter`)
+  in `try/finally` so a failed fixed-workflow call can't leave `call_openrouter` permanently
+  wrapped for the next question in the race.
+
+### Status — what's actually done vs. what's still pending
+This machine has no `.env`, no Docker/Qdrant, and none of the Python dependencies installed, so
+**nothing above has been run yet.** Being explicit about this against the brief's own mentor
+checklist:
+
+| Mentor check | Status |
+|---|---|
+| Agent completes a genuinely multi-step task, with steps visible | 🟡 Code written and reviewed, not yet run |
+| Stops safely instead of looping forever | 🟡 Logic written and reviewed (one bug found + fixed), not yet run |
+| Compared against a fixed sequence with real numbers | 🔴 Not done — `agent_vs_workflow.py` will produce real numbers once run, but no run has happened |
+| Can say which one to ship, and why | 🔴 Not done — this is a human judgment call that has to be made *after* watching real output, not before |
+
+**Next step:** run `python agent_vs_workflow.py` on a machine with the dependencies installed,
+Qdrant running, and documents ingested (see "How to Run" below), then update this section with
+the actual results and a written ship/no-ship conclusion.
+
+---
+
 ## File Summary
 
 | File | Week | What it does |
@@ -301,6 +397,8 @@ before/after number for any future change.
 | `judge_calibration.py` | 6 | Validates the judge against human grading |
 | `ragas_eval.py` | 6 | RAGAS-based alternative eval |
 | `compare_eval_runs.py` | 6 | Before/after diff, per problem type |
+| `agent.py` | 7 | Hand-built ReAct loop — `search_policy_docs`, `calculate_tenure`, `finish` tools |
+| `agent_vs_workflow.py` | 7 | Races `agent.py` against `structured_answer.ask_structured()` on speed/cost/correctness |
 | `requirements.txt` | 3, 4, 6 | Pinned dependencies (created W3, `rank_bm25` added W4, RAGAS deps added W6) |
 | `list_models.py` | 4 | Lists available free OpenRouter models |
 
@@ -441,6 +539,19 @@ python eval.py --save before.json
 # ... make your one change ...
 python eval.py --save after.json
 python compare_eval_runs.py before.json after.json
+```
+
+### 8. Run the agent (Week 7)
+
+```bash
+python agent.py "A new employee is 45 days into their job and wants to start working remotely 2 days a week. Is that allowed right now, and if not, when would it become allowed?"
+```
+Prints every Thought/Action/Observation step live, then the final answer with a step/call/time summary.
+
+Race it against the existing fixed workflow:
+```bash
+python agent_vs_workflow.py
+python agent_vs_workflow.py --save race.json
 ```
 
 ### Common issues

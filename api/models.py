@@ -50,6 +50,9 @@ class QueryRequest(BaseModel):
     filters: Optional[dict] = None
     use_hybrid: bool = True
     confidence_threshold: float = Field(default=CONFIDENCE_THRESHOLD, ge=0.0, le=1.0)  # reads from config.py
+    # Week 2 upgrade: Pydantic-validated JSON output (structured_answer.py) instead of free-text
+    # parsing. Opt-in and defaults to False so the existing UI/clients are unaffected.
+    use_structured_output: bool = False
 
 
 class RetrievedChunk(BaseModel):
@@ -73,3 +76,9 @@ class QueryResponse(BaseModel):
     model: str
     trace_id: Optional[str] = None
     trace_url: Optional[str] = None
+    # Populated only when use_structured_output=True was requested. `answer` above is still set
+    # (from structured.answer) so existing clients that only read `answer` keep working unchanged.
+    quotes: Optional[List[str]] = None
+    reasoning: Optional[str] = None
+    sources: Optional[List[str]] = None
+    is_refusal: Optional[bool] = None

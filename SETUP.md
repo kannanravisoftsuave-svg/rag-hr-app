@@ -124,7 +124,15 @@ The Vite dev server proxies `/api/*` → `http://localhost:8000` automatically.
 
 ---
 
-## 8. (Optional) Streamlit UI
+## 8. (Optional) Week 6 — evals
+
+For the eval/regression-testing scripts (`eval.py`, `judge.py`, `ragas_eval.py`,
+etc.), see **[EVALS_SETUP.md](EVALS_SETUP.md)** — it needs one extra
+`pip install` for the RAGAS-based script, explained there.
+
+---
+
+## 9. (Optional) Streamlit UI
 
 If you prefer the Streamlit interface:
 

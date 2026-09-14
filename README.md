@@ -70,6 +70,17 @@ tracing infrastructure (`tracing.py`) already exists to carry it.
   answer relevancy, context precision/recall) as an alternative to the hand-rolled judge
 - `compare_eval_runs.py` — before/after score comparison per problem type
 
+### Week 7 — Agent Loops (and when not to use them)
+- **`agent.py`** — a hand-built ReAct loop (Thought → Action → Observation, repeated), no
+  framework. Three tools: `search_policy_docs` (wraps the existing `retrieve()`), `calculate_tenure`
+  (exact date-math in code, aimed directly at the still-open date-disambiguation bug from
+  `FINDINGS.md` #4 — the model no longer has to do date arithmetic in its head), and `finish`.
+  Safety limits: max steps, max wall-clock time, and repeated-identical-action detection.
+- **`agent_vs_workflow.py`** — races the new agent against the *already-built* fixed workflow
+  (`structured_answer.ask_structured()`) on the two hardest regression questions from `eval.py`
+  (multi-hop reasoning, date disambiguation), comparing speed, LLM-call count (cost proxy), and
+  correctness. No new "fixed workflow" was built — the existing one-shot pipeline *is* the baseline.
+
 ### Also built (infrastructure spanning multiple weeks)
 - **FastAPI backend** (`api/`) — endpoints for upload, query, documents, chunks, collections, health
 - **React UI** (`ui-react/`) — upload, query, document browser, and trace-viewer pages;

@@ -81,6 +81,21 @@ tracing infrastructure (`tracing.py`) already exists to carry it.
   (multi-hop reasoning, date disambiguation), comparing speed, LLM-call count (cost proxy), and
   correctness. No new "fixed workflow" was built — the existing one-shot pipeline *is* the baseline.
 
+### Week 8 — Agent Failure Modes and Trajectory Evals
+- **`agent_trajectory_eval.py`** — evaluates the agent's action path separately from its final
+  answer. It checks required tool order, forbidden tools, invalid arguments, finish state, and
+  reports the important outcome-vs-trajectory gap: a correct answer obtained through a bad path.
+- **`agent_security.py`** — validates the narrow input schema for every existing tool and treats
+  retrieved document text as untrusted. Instruction-like prompt-injection lines are quarantined
+  before retrieval output returns to the agent's prompt; this is a boundary control, not a claim
+  that prompt injection is fully solved.
+- **`fixtures/week8_indirect_prompt_injection.md`** — a deliberately malicious document fixture
+  used to show the attack and verify the retrieval-output defense without touching real HR data.
+- Run `python agent_trajectory_eval.py --fixtures` to verify the deterministic evaluator and
+  injection boundary, then `python agent_trajectory_eval.py --live --save week8_before.json`
+  before one focused fix and rerun it as `week8_after.json`. Results must be added here only after
+  the real environment (Python, Qdrant, documents, and OpenRouter key) is available.
+
 ### Also built (infrastructure spanning multiple weeks)
 - **FastAPI backend** (`api/`) — endpoints for upload, query, documents, chunks, collections, health
 - **React UI** (`ui-react/`) — upload, query, document browser, and trace-viewer pages;
@@ -127,6 +142,11 @@ judge_calibration.py  Week 6: validates judge.py against your own grading
 ragas_eval.py      Week 6: same eval set, scored with RAGAS instead
 compare_eval_runs.py  Week 6: diff two saved eval.py runs, per problem type
 EVALS_SETUP.md     Week 6: setup for the eval scripts above
+agent.py            Week 7: hand-built ReAct agent loop
+agent_vs_workflow.py Week 7: agent versus fixed-workflow comparison
+agent_security.py   Week 8: tool-input validation and untrusted document-output boundary
+agent_trajectory_eval.py Week 8: outcome and action-path evaluation
+fixtures/           Week 8: controlled prompt-injection test fixture
 ```
 
 ---
@@ -147,6 +167,22 @@ cd ui-react && npm run dev
 
 # 4. Open http://localhost:3000
 ```
+
+### Week 8 safety and trajectory checks
+
+```bash
+# No Qdrant, model, or API key required. Verifies the test fixture and evaluator itself.
+python agent_trajectory_eval.py --fixtures
+
+# Requires the normal app prerequisites. Save a baseline before one focused change,
+# then rerun with a different output name after the change.
+python agent_trajectory_eval.py --live --save week8_before.json
+python agent_trajectory_eval.py --live --save week8_after.json
+```
+
+Interpret a live run in two dimensions: `outcome_pass_rate` answers whether the HR answer was
+correct, while `trajectory_pass_rate` answers whether the agent took the expected safe tool path.
+Never use an improved answer rate alone as proof that an agent became safer.
 
 ---
 

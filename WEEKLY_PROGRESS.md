@@ -446,6 +446,70 @@ advance.
 
 ---
 
+## Week 9 — MCP, Multi-Agent and A2A
+
+**Format:** build week. Week 9 replaces the direct in-process tool boundary used by Week 7 with a
+standard MCP tool boundary; it does not replace retrieval, Qdrant, or the existing HR policy data.
+
+### What We Learned
+
+- MCP is interoperability plumbing, not an intelligence upgrade. A host runs the LLM; an MCP
+  server exposes tools, resources, or prompts and does not need to know which model called it.
+- With local stdio transport, the host launches the server as a subprocess and JSON-RPC travels
+  only through stdin/stdout. Server stdout must therefore contain protocol messages only.
+- Tool discovery matters: a host requests `tools/list`, receives names, descriptions, and input
+  schemas, then can use a newly added server tool without a new hard-coded client registry.
+- A reusable server needs an intentionally narrow capability surface. Read-only HR search and
+  deterministic tenure calculation are safe enough to share; upload, deletion, secrets, shell
+  access, and arbitrary database queries are not exposed.
+
+### What We Did
+
+#### 1. `mcp_server.py` — reusable HR-policy server
+
+- Uses the official MCP Python SDK and the default stdio transport.
+- Publishes `search_hr_policy(query, top_k)` using the existing hybrid `retrieve()` path instead
+  of duplicating retrieval. Dependencies load lazily so discovery itself does not load embeddings.
+- Publishes `calculate_tenure(start_date, as_of_date)` as a second independent tool. It proves a
+  peer can discover an added tool without modifying `mcp_agent.py`.
+- Bounds query length, result count, and date format. Search results pass through the Week 8
+  untrusted-content quarantine before a host/model receives them.
+
+#### 2. `mcp_agent.py` — discovery-driven host/client
+
+- Starts the server with `StdioServerParameters`, then calls `tools/list` before the LLM is asked
+  to choose an action.
+- Builds the LLM's tool catalog from the returned MCP names, descriptions, and JSON schemas. It
+  accepts only a tool name that was actually returned by discovery; `finish` is host-local control
+  flow, not a server tool.
+- Tool errors become observations the model can recover from, while server/connection failures are
+  returned as an explicit stopped reason rather than being hidden.
+
+#### 3. Evidence and peer-review support
+
+- `mcp_demo.py` independently prints discovered schemas, calls both tools, and checks MCP errors.
+- `MCP_SETUP.md` records the host/client/server model, a simplified JSON-RPC handshake, launch
+  commands, security limitations, and instructions for an external peer to run the server/client.
+- `requirements.txt` adds the official `mcp[cli]` SDK on the current v2 line.
+
+### Status — evidence still required
+
+The local machine still has no installed Python runtime, so the MCP server and client have not
+been run here. Do not claim discovery, tool invocation, or peer validation until these commands
+complete in a configured environment:
+
+```bash
+pip install -r requirements.txt
+docker start qdrant-hr
+python mcp_demo.py
+python mcp_agent.py "What is the probation period for new hires?"
+```
+
+For the explicit peer requirement, another person must clone the branch, run `python mcp_demo.py`,
+and return their command output. Add their actual result here after it happens.
+
+---
+
 ## File Summary
 
 | File | Week | What it does |
@@ -468,6 +532,10 @@ advance.
 | `agent_security.py` | 8 | Validates least-privilege tool inputs and quarantines suspicious retrieved instructions |
 | `agent_trajectory_eval.py` | 8 | Scores answer outcome and tool trajectory independently; supports before/after evidence |
 | `fixtures/week8_indirect_prompt_injection.md` | 8 | Controlled indirect prompt-injection fixture; not a production HR document |
+| `mcp_server.py` | 9 | Read-only MCP server exposing HR search and exact tenure calculation |
+| `mcp_agent.py` | 9 | Host/client agent that discovers server tools through `tools/list` |
+| `mcp_demo.py` | 9 | Repeatable MCP discovery and invocation demonstration |
+| `MCP_SETUP.md` | 9 | MCP architecture, runbook, protocol explanation, and peer test instructions |
 | `requirements.txt` | 3, 4, 6 | Pinned dependencies (created W3, `rank_bm25` added W4, RAGAS deps added W6) |
 | `list_models.py` | 4 | Lists available free OpenRouter models |
 
@@ -633,6 +701,18 @@ python agent_trajectory_eval.py --fixtures
 python agent_trajectory_eval.py --live --save week8_before.json
 python agent_trajectory_eval.py --live --save week8_after.json
 ```
+
+### 10. Run the MCP server/client demonstration (Week 9)
+
+```bash
+pip install -r requirements.txt
+docker start qdrant-hr
+python mcp_demo.py
+python mcp_agent.py "What is the probation period for new hires?"
+```
+
+See `MCP_SETUP.md` before asking a peer to validate the server. The peer result must be recorded
+only after another person actually runs the demo.
 
 ### Common issues
 

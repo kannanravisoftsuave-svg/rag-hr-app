@@ -96,6 +96,18 @@ tracing infrastructure (`tracing.py`) already exists to carry it.
   before one focused fix and rerun it as `week8_after.json`. Results must be added here only after
   the real environment (Python, Qdrant, documents, and OpenRouter key) is available.
 
+### Week 9 — MCP, Multi-Agent and A2A
+- **`mcp_server.py`** — an official MCP Python SDK server exposing two read-only, reusable HR
+  capabilities: `search_hr_policy` (the existing hybrid retrieval path) and `calculate_tenure`
+  (deterministic date arithmetic). The server does not run an LLM.
+- **`mcp_agent.py`** — an MCP host/client agent. It starts the server over local stdio, calls
+  `tools/list`, puts the discovered names/descriptions/schemas into the agent prompt, and invokes
+  only tools returned by discovery. Adding a server tool does not require changing this agent.
+- **`mcp_demo.py`** — a reproducible discovery and tool-call demonstration, including the second
+  tool, so the MCP boundary can be reviewed without an LLM decision loop.
+- **`MCP_SETUP.md`** — local setup, host/client/server architecture, JSON-RPC handshake example,
+  security boundaries, and the separate peer-validation procedure required by the brief.
+
 ### Also built (infrastructure spanning multiple weeks)
 - **FastAPI backend** (`api/`) — endpoints for upload, query, documents, chunks, collections, health
 - **React UI** (`ui-react/`) — upload, query, document browser, and trace-viewer pages;
@@ -147,6 +159,10 @@ agent_vs_workflow.py Week 7: agent versus fixed-workflow comparison
 agent_security.py   Week 8: tool-input validation and untrusted document-output boundary
 agent_trajectory_eval.py Week 8: outcome and action-path evaluation
 fixtures/           Week 8: controlled prompt-injection test fixture
+mcp_server.py        Week 9: read-only HR MCP tool server
+mcp_agent.py         Week 9: MCP-discovering agent host/client
+mcp_demo.py          Week 9: tool discovery and invocation demonstration
+MCP_SETUP.md         Week 9: MCP runbook and peer-validation instructions
 ```
 
 ---
@@ -183,6 +199,18 @@ python agent_trajectory_eval.py --live --save week8_after.json
 Interpret a live run in two dimensions: `outcome_pass_rate` answers whether the HR answer was
 correct, while `trajectory_pass_rate` answers whether the agent took the expected safe tool path.
 Never use an improved answer rate alone as proof that an agent became safer.
+
+### Week 9 MCP demonstration
+
+```bash
+# Requires Python 3.10+, dependencies, Qdrant, and ingested HR documents.
+python mcp_demo.py
+python mcp_agent.py "What is the probation period for new hires?"
+```
+
+The MCP agent is the **host** and runs the LLM. `mcp_server.py` is only the **server**:
+it publishes tools and returns results. See **[MCP_SETUP.md](MCP_SETUP.md)** for the raw JSON-RPC
+handshake explanation, peer test procedure, and security limits.
 
 ---
 

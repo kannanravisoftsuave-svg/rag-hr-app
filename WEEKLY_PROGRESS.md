@@ -380,6 +380,72 @@ the actual results and a written ship/no-ship conclusion.
 
 ---
 
+## Week 8 — Agent Failure Modes and Trajectory Evals
+
+**Format:** build week. This work extends the Week 7 agent; it does not replace the RAG pipeline.
+
+### What We Learned
+
+- A final answer and an agent trajectory are different things. An agent can reach a correct answer
+  after choosing a forbidden tool, skipping a necessary verification step, or getting lucky.
+- Retrieved policy text is **untrusted data**. A document can contain instructions intended for the
+  model rather than policy facts; tool output needs a boundary control before it goes back into the
+  agent loop.
+- Least privilege is concrete: the agent only gets three named actions, each with a small accepted
+  input shape. Extra fields and malformed values are rejected before application logic runs.
+
+### What We Did
+
+#### 1. Structured trajectory evidence in `agent.py`
+
+- `run_agent()` now returns an `events` list in addition to the readable transcript. Each event
+  records the step, action, action input, validation status, and tool observation. This lets a test
+  evaluate the path without parsing console text.
+- Every action is validated before its tool executes. Search accepts only a bounded query, the
+  date tool accepts exactly two ISO dates, and finish accepts only a bounded answer field.
+- The agent system prompt now explicitly says observations are untrusted reference data, never
+  instructions. This preserves the correct trust hierarchy: user request and system rules direct
+  actions; retrieved documents provide facts only.
+
+#### 2. Retrieval-output prompt-injection boundary in `agent_security.py`
+
+- `sanitize_untrusted_document_text()` scans retrieval output for a narrow set of known
+  instruction/exfiltration patterns and replaces suspicious lines with an explicit quarantine
+  marker before the text returns to the model.
+- This is deliberately documented as a partial control, not a complete prompt-injection solution.
+  Obfuscated instructions, benign-looking attacks, and attacks that do not match the patterns may
+  still pass; the remaining protections are least-privilege tools, strict input validation, and no
+  secret-bearing tools in the agent.
+- `fixtures/week8_indirect_prompt_injection.md` contains harmless HR text plus a visible malicious
+  instruction. It is test data only and should never be treated as an application policy source.
+
+#### 3. Outcome and trajectory evaluator in `agent_trajectory_eval.py`
+
+- `evaluate_trajectory()` independently scores answer keywords and action-path requirements:
+  required action order, forbidden tools, invalid tool inputs, and whether the run finished safely.
+- The deterministic fixture proves the brief's key distinction: the answer can be correct while
+  the trajectory is wrong because the agent skipped `calculate_tenure` for a tenure question.
+- `--fixtures` runs without Qdrant or an LLM. `--live` runs the real Week 7 agent against two
+  representative cases and can save JSON output for a true before/after comparison.
+
+### Status — evidence still required
+
+This machine currently has no usable Python executable, so no fixture or live evaluation has been
+run here. Do not report an improvement number yet. On a configured machine, run:
+
+```bash
+python agent_trajectory_eval.py --fixtures
+python agent_trajectory_eval.py --live --save week8_before.json
+# make one focused fix to the largest observed trajectory failure
+python agent_trajectory_eval.py --live --save week8_after.json
+```
+
+Record outcome pass rate, trajectory pass rate, and the number of outcome-vs-trajectory gaps from
+both JSON files. The best first fix should be selected from the baseline, rather than guessed in
+advance.
+
+---
+
 ## File Summary
 
 | File | Week | What it does |
@@ -399,6 +465,9 @@ the actual results and a written ship/no-ship conclusion.
 | `compare_eval_runs.py` | 6 | Before/after diff, per problem type |
 | `agent.py` | 7 | Hand-built ReAct loop — `search_policy_docs`, `calculate_tenure`, `finish` tools |
 | `agent_vs_workflow.py` | 7 | Races `agent.py` against `structured_answer.ask_structured()` on speed/cost/correctness |
+| `agent_security.py` | 8 | Validates least-privilege tool inputs and quarantines suspicious retrieved instructions |
+| `agent_trajectory_eval.py` | 8 | Scores answer outcome and tool trajectory independently; supports before/after evidence |
+| `fixtures/week8_indirect_prompt_injection.md` | 8 | Controlled indirect prompt-injection fixture; not a production HR document |
 | `requirements.txt` | 3, 4, 6 | Pinned dependencies (created W3, `rank_bm25` added W4, RAGAS deps added W6) |
 | `list_models.py` | 4 | Lists available free OpenRouter models |
 
@@ -552,6 +621,17 @@ Race it against the existing fixed workflow:
 ```bash
 python agent_vs_workflow.py
 python agent_vs_workflow.py --save race.json
+```
+
+### 9. Evaluate agent safety and trajectory (Week 8)
+
+```bash
+# Deterministic local checks: no model/API/Qdrant needed
+python agent_trajectory_eval.py --fixtures
+
+# Real baseline and post-fix runs: requires .env, Qdrant, and ingested policy documents
+python agent_trajectory_eval.py --live --save week8_before.json
+python agent_trajectory_eval.py --live --save week8_after.json
 ```
 
 ### Common issues
